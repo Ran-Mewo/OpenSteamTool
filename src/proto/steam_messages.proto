@@ -312,3 +312,11 @@ message CMsgClientPersonaState {
 	optional uint32 status_flags = 1;
 	repeated .CMsgClientPersonaState.Friend friends = 2;
 }
+
+// ============================================================
+// CCloud_GetAppFileChangelist_Request  (eMsg 151 target_job_name: Cloud.GetAppFileChangelist#1)
+// ============================================================
+message CCloud_GetAppFileChangelist_Request {
+	optional uint32 appid = 1;
+	optional uint64 synced_change_number = 2;
+}

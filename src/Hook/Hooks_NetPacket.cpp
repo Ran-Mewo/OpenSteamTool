@@ -8,6 +8,7 @@
 #include <chrono>
 #include <future>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "steam_messages.pb.h"
 
@@ -123,6 +124,7 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
+    constexpr uint32 HASH_JOB_Cloud_GetAppFileChangelist = Fnv1aHash("Cloud.GetAppFileChangelist#1");
 
 } // anonymous namespace
 
@@ -624,6 +626,49 @@ namespace Hooks_NetPacket_OnlineFix {
 
 
 // ════════════════════════════════════════════════════════════════
+//  Hooks_NetPacket_Cloud
+//
+//  Outgoing: CCloud_GetAppFileChangelist_Request
+//            (eMsg 151 -> target: Cloud.GetAppFileChangelist#1)
+// ════════════════════════════════════════════════════════════════
+namespace Hooks_NetPacket_Cloud {
+
+    bool HandleSend_GetAppFileChangelist(const uint8* pBody, uint32 cbBody)
+    {
+        CCloud_GetAppFileChangelist_Request req;
+        if (!req.ParseFromArray(pBody, cbBody)) {
+            LOG_CLOUD_WARN("Cloud.GetAppFileChangelist request: failed to ParseFromArray");
+            return false;
+        }
+
+        AppId_t appId = req.appid();
+        if (!LuaConfig::HasDepot(appId))
+            return false;
+
+        // Only the first changelist call per (appid, Steam session) needs the
+        // rewrite — afterwards the client holds Valve's real watermark and we
+        // must not stomp it.
+        static std::unordered_set<AppId_t> s_forced;
+        if (!s_forced.insert(appId).second)
+            return false;
+
+        LOG_CLOUD_DEBUG("Cloud.GetAppFileChangelist request: original body:\n{}", req.DebugString());
+        req.set_synced_change_number(1);
+
+        g_cbSendNewBody = static_cast<uint32>(req.ByteSizeLong());
+        if (!req.SerializeToArray(g_SendNewBody, kMaxBodySize)) {
+            LOG_CLOUD_WARN("Cloud.GetAppFileChangelist request: failed to SerializeToArray");
+            return false;
+        }
+
+        LOG_CLOUD_DEBUG("Cloud.GetAppFileChangelist request: modified body:\n{}", req.DebugString());
+        return true;
+    }
+
+} // namespace Hooks_NetPacket_Cloud
+
+
+// ════════════════════════════════════════════════════════════════
 //  Dispatch
 // ════════════════════════════════════════════════════════════════
 namespace {
@@ -640,6 +685,9 @@ namespace {
 
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
+
+        case HASH_JOB_Cloud_GetAppFileChangelist:
+            return Hooks_NetPacket_Cloud::HandleSend_GetAppFileChangelist(pBody, cbBody);
 
         // ---- add new 151 service methods here ----
         }
