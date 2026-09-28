@@ -9,7 +9,7 @@
 #include "Hooks_NetPacket.h"
 #include "Hooks_Package.h"
 #include "Hooks_SteamUI.h"
-#include "Utils/VehCommon.h"
+#include "Utils/HookSupport/VehCommon.h"
 
 
 namespace SteamUI {

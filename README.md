@@ -1,12 +1,38 @@
-# OpenSteamTool
+<div align="center">
+  <img src="docs/bst.png" width="100%" alt="BetterSteamTools logo">
 
-![cpp](https://img.shields.io/badge/cpp-20%2B-green?logo=cplusplus)
-![CMake](https://img.shields.io/badge/CMake-3.20%2B-green?logo=cmake)
-![OnlyWindows](https://img.shields.io/badge/windows%20only-red?style=for-the-badge)
+  <h1>BetterSteamTools - a fork of OpenSteamTools!</h1>
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/OpenSteam001/OpenSteamTool)
+  <p>
+    <strong>Open-Source Steam Unlock Tool</strong>
+  </p>
 
-OpenSteamTool is a Windows DLL project built with CMake.
+  <p>
+    <img src="https://img.shields.io/badge/C%2B%2B-20%2B-2ea44f?logo=cplusplus&logoColor=white" alt="C++ 20+">
+    <img src="https://img.shields.io/badge/CMake-3.20%2B-2ea44f?logo=cmake&logoColor=white" alt="CMake 3.20+">
+    <img src="https://img.shields.io/badge/Windows-only-d73a49?logo=windows&logoColor=white" alt="Windows only">
+    <a href="https://deepwiki.com/OpenSteam001/OpenSteamTool">
+      <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
+    </a>
+  </p>
+
+  <p>
+    <a href="README.md">
+      <img src="https://flagcdn.com/w40/us.png" width="22" alt="United States flag">
+      English
+    </a>
+    &nbsp;|&nbsp;
+    <a href="README_ES.md">
+      <img src="https://flagcdn.com/w40/es.png" width="22" alt="Spain flag">
+      Español
+    </a>
+    &nbsp;|&nbsp;
+    <a href="README_ZH.md">
+      <img src="https://flagcdn.com/w40/cn.png" width="22" alt="China flag">
+      中文
+    </a>
+  </p>
+</div>
 
 ## Feature
 
@@ -21,15 +47,23 @@ OpenSteamTool is a Windows DLL project built with CMake.
 ### Hot Reload
 - Adding, modifying, deleting, or overwriting `.lua` files in any watched directory automatically triggers a reload. No restart, no offline/online toggle needed.
 
+### Injection
+- Add optional game-process DLL injection through one or more `[[inject]]` entries in `opensteamtool.toml`.
+- Each entry sets a `path` (a bare name resolves next to `steam.exe`; an absolute path is used as-is) and optional conditions — `when_cmdline` (substring required in the launch command), `when_appids` (restrict to specific appids), and `all_games` (`true` = every game, `false` = only Lua-added games). A DLL injects when *every* condition it sets matches; multiple entries may target the same game and each DLL injects at most once.
+
 ### Family Sharing and Remote Play
 - Bypass Steam Family Sharing restrictions for games that have been added to the library with `addappid` in Lua. All accounts in the Steam Family that participate in sharing must use OpenSteamTool for this to work.
 
 ### Compatible with games protected by Denuvo and SteamStub
 - SteamStub-only games do not require configuring `AppTicket`. OpenSteamTool can reuse Steam's local ConfigStore ticket and forge the requested AppId through a SteamDRMP off-by-four ticket parsing vulnerability, without injecting into the game process.
-- Denuvo-protected games still require explicit ticket data. In `HKEY_CURRENT_USER\Software\Valve\Steam\Apps\{AppId}`, both `AppTicket` and `ETicket` are `REG_BINARY` values.
-- Use `setAppTicket(appid, "hex")` and `setETicket(appid, "hex")` in Lua config to write these values to the registry automatically.
-- AppTicket priority: explicit tickets have the highest priority, including tickets configured by `setAppTicket` and existing `AppTicket` registry values. If no explicit AppTicket is available, OpenSteamTool falls back to the forged local ConfigStore ticket path.
-- SteamID priority: read `SteamID` as `REG_SZ` (numeric-only) first; if missing, parse from explicit `AppTicket`.
+
+### Third-party product keys ("Updating product key")
+- For titles that carry a Steam-issued third-party retail key (Ubisoft Connect, Rockstar, etc.), OpenSteamTool answers the client's legacy key request locally, so the "Updating product key" step completes for added games instead of failing. Supply a real key with `setlegacycdkey(appid, "KEY")`; when none is configured a deterministic synthetic key is generated. A synthetic key satisfies Steam's local step only — titles that validate the key online still require a real one.
+- Denuvo-protected games still require explicit ticket data. OpenSteamTool stores `AppTicket` and `ETicket` through the platform credential store.
+- Use `setAppTicket(appid, "hex")` and `setETicket(appid, "hex")` in Lua config to write these values to the platform credential store automatically.
+- Denuvo verification has a 30-minute validity window. After this window expires, authorization may fail with Denuvo error code `88500005`; refresh the ticket data before retrying.
+- AppTicket priority: explicit tickets have the highest priority, including tickets configured by `setAppTicket` and existing cached `AppTicket` credential values. If no explicit AppTicket is available, OpenSteamTool falls back to the forged local ConfigStore ticket path.
+- SteamID priority: read cached `SteamID` first; if missing, parse from explicit `AppTicket`. On Windows, the credential store backend currently uses `HKCU\Software\Valve\Steam\Apps\<AppId>`. The Linux backend is not implemented yet.
 
 #### Extracting tickets with `extract_tickets`
 
@@ -61,17 +95,20 @@ The `extract_tickets` tool dumps the `AppTicket` and `ETicket` hex strings you n
 ### Stats and Achievements
 - Enable stats and achievements for unowned games.
 - Uses `setStat(appid, "steamid")` to configure which SteamID's achievement data to pull.
-- If no `setStat` is configured for an app, falls back to the hardcoded default SteamID `76561198028121353`.
+- If no `setStat` is configured for an app, OpenSteamTool queries `https://stats.opensteamtool.com/{appid}` when `[stats] enable_api = true` (default).
+- Priority: `setStat` > stats API when enabled and valid > hardcoded preset SteamID `76561198028121353`.
 
 ### Online Fix
 - Add `-onlinefix` to the Steam launch parameters to enable 480-based online play in games that use lobby matchmaking. The current limitation is that only one such game can run at a time.To revert, simply remove -onlinefix from the launch parameters — online play returns to normal on the next launch.
 - Games that use EOS matchmaking instead of Steam are also supported.
+- Add `-realappid` alongside `-onlinefix` if the game **launches but then hangs, black-screens or misbehaves after login**.
+
+  Once P2P starts, `-onlinefix` normally reports the fake AppId (480) when the game asks Steam *which game am I* — some titles need that for their networking to line up. Others read the same answer during startup, get 480 instead of their own AppId, and break on it. `-realappid` keeps the 480 spoof everywhere else (so ownership and matchmaking still work) while answering that one question honestly.
+
+  Known to need it: Bodycam (2406770). If a game works without it, leave it off.
 
 ## Future
-- For games protected by Denuvo and SteamStub, find a safe timing to switch `GetSteamID` (see `src/Hook/Hooks_IPC.cpp#Handler_IClientUser_GetSteamID` TODO) so save files are not affected.(**Suggestions welcome — when is the earliest point after game initialization that we can safely switch the
-  SteamID without affecting save file binding?**)
 - Steam Cloud synchronization support.(This is a huge project)
-- Add Auto Denuvo Authorization Sharing for Legitimate Accounts.
 
 ## Usage
 1. Run `build.bat` from the project root to build the project.
@@ -90,12 +127,15 @@ addtoken(1361510,"2764735786934684318") -- add access token ("276473578693468431
 setManifestid(1361511,"5656605350306673283") -- pin depotid:1361511 manifest_gid:5656605350306673283, size defaults to 0
 setManifestid(1361511,"5656605350306673283", 12345678) -- same but with explicit size
 
-setAppTicket(1361510,"0100000000000000...") -- write AppTicket (REG_BINARY) to HKCU\Software\Valve\Steam\Apps\1361510\AppTicket
+setAppTicket(1361510,"0100000000000000...") -- write AppTicket to the credential store; on Windows: HKCU\Software\Valve\Steam\Apps\1361510\AppTicket
 
-setETicket(1361510,"0100000000000000...") -- write ETicket (REG_BINARY) to HKCU\Software\Valve\Steam\Apps\1361510\ETicket
+setETicket(1361510,"0100000000000000...") -- write ETicket to the credential store; on Windows: HKCU\Software\Valve\Steam\Apps\1361510\ETicket
 
 setStat(1361510, "76561197960287930") -- use the specified SteamID's achievement data for appid 1361510
--- If not configured, default SteamID 76561198028121353 is used.
+-- If not configured, the stats API is used when enabled; otherwise default SteamID 76561198028121353 is used.
+
+setlegacycdkey(1361510, "ABCD-EFGH-JKMN-PQRS") -- serve this third-party retail CD key at the "Updating product key" step
+-- If not configured, a deterministic synthetic key is generated per app+account (satisfies Steam's local step only).
 ```
 
 All function names are **case-insensitive**. `setAppTicket`, `setappticket`, `SetAppticket`, `SETAPPTICKET` etc. are all equivalent. The same applies to every registered function (`addAppId`, `AddToken`, `SETManifestid`, etc.).
@@ -104,6 +144,7 @@ All function names are **case-insensitive**. `setAppTicket`, `setappticket`, `Se
 
 Rename `opensteamtool.example.toml` to `opensteamtool.toml` and place it in the Steam root directory (next to `steam.exe`).
 If no config file is found, built-in defaults are used — no auto-creation.
+The file is watched while Steam is running; valid changes are hot-reloaded without restarting Steam.
 
 ```toml
 [log]
@@ -120,11 +161,35 @@ timeout_connect_ms = 5000
 timeout_send_ms    = 10000
 timeout_recv_ms    = 10000
 
+[stats]
+# Query https://stats.opensteamtool.com/{appid} when no Lua setStat override exists.
+# Priority: setStat > stats API > hardcoded preset SteamID.
+enable_api = true
+
 # Additional Lua config directories (optional).
-# Files are loaded after the default <Steam>/config/lua folder.
+# Files are loaded after the default <Steam>/config/stplug-in folder.
 # The default folder is always loaded last so user files take priority.
 [lua]
 paths = []
+
+# Optional DLL injection into game processes. Each [[inject]] entry is loaded
+# when every condition it sets matches the launch.
+# [[inject]]
+# path = "OpenSteamToolHook.dll"      # bare name resolves next to steam.exe; absolute path used as-is
+# when_cmdline = "-my_special_hook"   # optional: require this substring in the launch command (default: any)
+# when_appids = [1361510]             # optional: restrict to these appids (default: any)
+# all_games = false                   # optional: true injects into every game, false only into Lua-added games (default: false)
+
+# Contribute manifest request codes for depots THIS account owns, so other users can
+# download those games. Only depots the archive asks for and this account owns are
+# ever mentioned; set enabled = false to opt out.
+[donate]
+enabled = true
+# interval_secs         = 30     # pause between cycles
+# wanted_refresh_secs   = 300    # how often the wanted list is re-fetched
+# max_mints_per_cycle   = 25     # most codes requested from Steam in one cycle
+# min_mint_interval_ms  = 2000   # minimum gap between requests to Steam
+# max_mints_per_session = 0      # 0 = no limit for the Steam session
 
 # Optional metadata mirror. See "Steam version compatibility" below.
 [remote]
@@ -132,7 +197,7 @@ paths = []
 
 # Disable in-game payload injection used by -onlinefix (EOS matchmaking).
 # The 480 AppId swap for Steam-matchmaking games is unaffected.
-[inject]
+[onlinefix]
 enabled = true
 ```
 
@@ -193,18 +258,21 @@ Debug builds write per-module log files under `<Steam>/opensteamtool/`:
 
 | File | Source | Content |
 |------|--------|---------|
-| `main.log`          | General | Init, config loading, Lua parsing,Utils |
+| `main.log`          | General | Init, config loading, Lua parsing, utilities |
 | `ipc.log`           | `LOG_IPC_*` | IPC commands, InterfaceCall dispatch, spoofing |
 | `netpacket.log`     | `LOG_NETPACKET_*` | Network packet send/recv, eMsg dispatch |
-| `manifest.log`      | `LOG_MANIFEST_*` | Manifest download, `fetch_manifest_code`,manifest binding |
+| `manifest.log`      | `LOG_MANIFEST_*` | Manifest download, `fetch_manifest_code`, manifest binding |
 | `decryptionkey.log` | `LOG_DECRYPTIONKEY_*` | Depot decryption key injection |
 | `keyvalue.log`      | `LOG_KEYVALUE_*` | KeyValues patching (manifest binding) |
 | `misc.log`          | `LOG_MISC_*` | Engine pointer capture, AppId hints |
-| `winhttp.log`       | `LOG_WINHTTP_*` | HTTP requests  |
 | `achievement.log`   | `LOG_ACHIEVEMENT_*` | UserStats requests/responses, steamid spoofing |
 | `pics.log`          | `LOG_PICS_*` | PICS access token injection |
 | `package.log`       | `LOG_PACKAGE_*` | Package injection, FileWatcher events |
 | `onlinefix.log`     | `LOG_ONLINEFIX_*` | Online fix (480 AppId spoofing) |
+| `richpresence.log`  | `LOG_RICHPRESENCE_*` | Rich Presence packet construction and injection |
+| `steamui.log`       | `LOG_STEAMUI_*` | SteamUI hook diagnostics |
+| `pipe.log`          | `LOG_PIPE_*` | Pipe handshakes, process inspection, Denuvo authorization, library injection |
+| `platform.log`      | `LOG_PLATFORM_*` | Platform helper diagnostics, including remote-process operations |
 
 The log level is controlled by `[log] level` in `opensteamtool.toml`.
 

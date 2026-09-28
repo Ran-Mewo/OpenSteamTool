@@ -115,7 +115,7 @@ namespace {
     // folder once per Steam session so the files don't pile up forever.
     void ResetPayloadLogs() {
         std::error_code ec;
-        auto dir = std::filesystem::path(Config::logDir) / "payload";
+        auto dir = std::filesystem::path(Config::GetLogDir()) / "payload";
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir, ec);
     }
@@ -124,7 +124,7 @@ namespace {
 
 namespace Hooks_Inject {
     void Install() {
-        if (!Config::injectEnabled) {
+        if (!Config::GetOnlineFixEnabled()) {
             LOG_INJECT_INFO("payload injection disabled via config");
             return;
         }
@@ -138,11 +138,9 @@ namespace Hooks_Inject {
 
         HOOK_BEGIN();
         if (oCreateProcessW)
-            DetourAttach(reinterpret_cast<PVOID*>(&oCreateProcessW),
-                         reinterpret_cast<PVOID>(hkCreateProcessW));
+            OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oCreateProcessW), reinterpret_cast<void*>(hkCreateProcessW));
         if (oCreateProcessAsUserW)
-            DetourAttach(reinterpret_cast<PVOID*>(&oCreateProcessAsUserW),
-                         reinterpret_cast<PVOID>(hkCreateProcessAsUserW));
+            OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oCreateProcessAsUserW), reinterpret_cast<void*>(hkCreateProcessAsUserW));
         HOOK_END();
         LOG_INJECT_INFO("spawn hooks installed dll=\"{}\"", PayloadPath);
     }
@@ -150,13 +148,11 @@ namespace Hooks_Inject {
     void Uninstall() {
         UNHOOK_BEGIN();
         if (oCreateProcessW) {
-            DetourDetach(reinterpret_cast<PVOID*>(&oCreateProcessW),
-                         reinterpret_cast<PVOID>(hkCreateProcessW));
+            OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oCreateProcessW), reinterpret_cast<void*>(hkCreateProcessW));
             oCreateProcessW = nullptr;
         }
         if (oCreateProcessAsUserW) {
-            DetourDetach(reinterpret_cast<PVOID*>(&oCreateProcessAsUserW),
-                         reinterpret_cast<PVOID>(hkCreateProcessAsUserW));
+            OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oCreateProcessAsUserW), reinterpret_cast<void*>(hkCreateProcessAsUserW));
             oCreateProcessAsUserW = nullptr;
         }
         UNHOOK_END();
@@ -166,7 +162,7 @@ namespace Hooks_Inject {
     }
 
     void QueueInjection(const char* exePath, AppId_t realAppId) {
-        if (!Config::injectEnabled || !realAppId || !exePath || !*exePath) return;
+        if (!Config::GetOnlineFixEnabled() || !realAppId || !exePath || !*exePath) return;
 
         wchar_t wexe[MAX_PATH] = {};
         MultiByteToWideChar(CP_UTF8, 0, exePath, -1, wexe, MAX_PATH);

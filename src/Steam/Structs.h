@@ -206,15 +206,13 @@ struct IKeyValuesSystem {
 };
 using KeyValuesSystemSteam_t = IKeyValuesSystem* (*)();
 
-struct CNetPacket
-{
-	HCONNECTION m_hConnection;
-	uint8* m_pubData;
-	uint32 m_cubData;
-	int32 m_cRef;
-	uint8* m_pubNetworkBuffer;
-	CNetPacket* m_pNext;
-};
+// Deliberately opaque — its layout moved between Steam client builds (the beta
+// inserted two uint32 version stamps after m_hConnection, shifting the rest by
+// 8), so declaring fields here would hardcode one client version and wild-write
+// on the other. Reach m_pubData/m_cubData through NetPkt::Data()/Size() in
+// Steam/NetPacket.h, which carries the full layout table and detects which one
+// this client uses at runtime.
+struct CNetPacket;
 
 struct MsgHdr
 {
@@ -239,13 +237,31 @@ struct ExtendedMsgHdr
 };
 #pragma pack(pop)
 
+// ── Legacy third-party CD-key ("Updating product key") ──────
+// Non-proto struct messages (EMsg 730 / 785). Wire layout mirrors SteamKit2
+// SteamLanguage: each frame is an ExtendedMsgHdr followed immediately by the
+// struct below; the response's key payload (m_cchKey bytes) trails the struct.
+#pragma pack(push,1)
+struct MsgClientGetLegacyGameKey
+{
+	uint32 m_unAppId;
+};
+
+struct MsgClientGetLegacyGameKeyResponse
+{
+	uint32  m_unAppId;
+	EResult m_eResult;
+	uint32  m_cchKey;   // length of the CD-key payload that follows this struct
+};
+#pragma pack(pop)
+
 // ── CPipeClient ────────────────────────────────────────────
 struct CPipeClient {
     void*    m_pServer;         // +0
     void*    m_pClient;         // +8
-    uint32   m_hSteamPipe;      // +16
+    HSteamPipe  m_hSteamPipe;      // +16
     uint8    _pad0[12];         // +20
-    uint32   m_clientPID;       // +32
+    PID_t    m_clientPID;       // +32
     uint8    _pad1[4];          // +36
     char*    m_szProcessName;   // +40
     uint8    _pad2[80];         // +48
@@ -301,8 +317,13 @@ struct CGameID{
 	};
 };
 
+constexpr unsigned int k_unSteamAccountIDMask = 0xFFFFFFFF;
+constexpr unsigned int k_unSteamAccountInstanceMask = 0x000FFFFF;
+constexpr unsigned int k_unSteamUserDefaultInstance	= 1; // fixed instance for all individual users
+
 struct CSteamID
 {
+
 	CSteamID()
 	{
 		m_steamid.m_comp.m_unAccountID = 0;
@@ -314,6 +335,28 @@ struct CSteamID
 	CSteamID( uint64 ulSteamID )
 	{
 		SetFromUint64( ulSteamID );
+	}
+
+	//-----------------------------------------------------------------------------
+	// Purpose: Sets parameters for steam ID
+	// Input  : unAccountID -	32-bit account ID
+	//			eUniverse -		Universe this account belongs to
+	//			eAccountType -	Type of account
+	//-----------------------------------------------------------------------------
+	void Set( uint32 unAccountID, EUniverse eUniverse, EAccountType eAccountType )
+	{
+		m_steamid.m_comp.m_unAccountID = unAccountID;
+		m_steamid.m_comp.m_EUniverse = eUniverse;
+		m_steamid.m_comp.m_EAccountType = eAccountType;
+
+		if ( eAccountType == k_EAccountTypeClan || eAccountType == k_EAccountTypeGameServer )
+		{
+			m_steamid.m_comp.m_unAccountInstance = 0;
+		}
+		else
+		{
+			m_steamid.m_comp.m_unAccountInstance = k_unSteamUserDefaultInstance;
+		}
 	}
 
 	void SetFromUint64( uint64 ulSteamID )

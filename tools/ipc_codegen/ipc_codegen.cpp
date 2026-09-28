@@ -66,6 +66,7 @@ struct CommandDecl {
     std::string enumValue;
     FrameDecl   request;
     FrameDecl   response;
+    bool        responseNone = false;
     int         line = 0;
 };
 
@@ -313,7 +314,13 @@ private:
                     hasRequest = true;
                 } else if (section.text == "response") {
                     if (hasResponse) fail(section.line, "duplicate command response section");
-                    command.response = parseFrame();
+                    if (token_.kind == Tok::Ident && token_.text == "none") {
+                        command.responseNone = true;
+                        advance();
+                        expect(Tok::Semi);
+                    } else {
+                        command.response = parseFrame();
+                    }
                     hasResponse = true;
                 } else {
                     fail(section.line, "expected 'request' or 'response', got '" + section.text + "'");
@@ -448,10 +455,22 @@ private:
         const ProtocolDecl& protocol = file.protocols.front();
         if (!findStruct(file, protocol.requestHeader))
             fail(protocol.line, "unknown protocol request header '" + protocol.requestHeader + "'");
-        if (protocol.commands.size() != 1 || protocol.commands.front().name != "IPCInterfaceCall")
-            fail("protocol IPC must declare exactly one IPCInterfaceCall command");
 
-        const CommandDecl& command = protocol.commands.front();
+        const CommandDecl* interfaceCall = nullptr;
+        for (const auto& command : protocol.commands) {
+            validateFrame(file, command.request, "request");
+            if (!command.responseNone) validateFrame(file, command.response, "response");
+            if (command.name == "IPCInterfaceCall") interfaceCall = &command;
+        }
+        if (!interfaceCall) fail("protocol IPC must declare IPCInterfaceCall command");
+        validateIPCInterfaceCall(*interfaceCall, file);
+    }
+
+    void validateIPCInterfaceCall(const CommandDecl& command, const File& file) {
+        if (command.enumValue != "EIPCCommand::InterfaceCall")
+            fail(command.line, "IPCInterfaceCall must use EIPCCommand::InterfaceCall");
+        if (command.responseNone)
+            fail(command.line, "IPCInterfaceCall response must be a frame");
         validateFrame(file, command.request, "request");
         validateFrame(file, command.response, "response");
         if (!framePayload(command.request) || !framePayload(command.response))
@@ -604,6 +623,7 @@ public:
         emitHelpers();
         emitLayouts();
         emitIPCRequest();
+        emitProtocolCommandViews();
         emitIPCInterfaceCall();
         emitIPCResponse();
         out_ << "template <class T>\n"
@@ -756,6 +776,79 @@ private:
                 "private:\n"
                 "    std::span<uint8> bytes_;\n"
                 "};\n\n";
+    }
+
+    void emitProtocolCommandViews() {
+        for (const auto& protocol : file_.protocols) {
+            if (protocol.name != "IPC") continue;
+            for (const auto& command : protocol.commands) {
+                if (command.name == "IPCInterfaceCall") continue;
+                if (!canEmitFixedFrame(command.request)) continue;
+                if (!command.responseNone && !canEmitFixedFrame(command.response)) continue;
+                emitFixedFrameView(command.name + "Req", command.request, false);
+                emitFixedFrameView(command.name + "Resp", command.response, command.responseNone);
+            }
+        }
+    }
+
+    void emitFixedFrameView(const std::string& className, const FrameDecl& frame, bool noneFrame) {
+        out_ << "class " << className << " {\n"
+                "public:\n"
+             << "    explicit " << className << "(std::span<uint8> bytes) : bytes_(bytes) {}\n"
+             << "    bool ok() const { return ";
+        if (noneFrame)
+            out_ << "bytes_.empty()";
+        else
+            out_ << "bytes_.size() >= " << frameFixedSizeExpr(frame);
+        out_ << "; }\n";
+        if (!noneFrame) {
+            for (size_t i = 0; i < frame.fields.size(); ++i) {
+                const FrameField& field = frame.fields[i];
+                const std::string offset = frameOffsetExpr(frame, i);
+                out_ << "    " << field.type << " " << field.name
+                     << "() const { return detail::Read<" << field.type << ">(bytes_, " << offset << "); }\n"
+                     << "    void set_" << field.name << "(" << field.type
+                     << " value) { detail::Write(bytes_, " << offset << ", value); }\n";
+            }
+        }
+        emitFrameDebugString(className, noneFrame ? FrameDecl{} : frame);
+        out_ << "private:\n"
+                "    std::span<uint8> bytes_;\n"
+                "};\n\n";
+    }
+
+    static bool canEmitFixedFrame(const FrameDecl& frame) {
+        for (const auto& field : frame.fields) {
+            if (field.payload || !isIntegral(field.type)) return false;
+        }
+        return true;
+    }
+
+    static std::string frameFixedSizeExpr(const FrameDecl& frame) {
+        std::vector<std::string> terms;
+        for (const auto& field : frame.fields) terms.push_back("sizeof(" + field.type + ")");
+        return sumExpr(terms);
+    }
+
+    static std::string frameOffsetExpr(const FrameDecl& frame, size_t index) {
+        std::vector<std::string> terms;
+        for (size_t i = 0; i < index; ++i)
+            terms.push_back("sizeof(" + frame.fields[i].type + ")");
+        return sumExpr(terms);
+    }
+
+    void emitFrameDebugString(const std::string& cls, const FrameDecl& frame) {
+        out_ << "    std::string DebugString() const {\n"
+                "        std::ostringstream os;\n"
+             << "        os << \"" << cls << "{\";\n";
+        for (size_t i = 0; i < frame.fields.size(); ++i) {
+            if (i) out_ << "        os << ' ';\n";
+            out_ << "        detail::AppendField(os, \"" << frame.fields[i].name
+                 << "\", " << frame.fields[i].name << "());\n";
+        }
+        out_ << "        os << '}';\n"
+                "        return os.str();\n"
+                "    }\n";
     }
 
     void emitIPCInterfaceCall() {
@@ -929,6 +1022,14 @@ private:
 
     static bool containsName(const std::vector<std::string>& names, std::string_view name) {
         return std::find(names.begin(), names.end(), name) != names.end();
+    }
+
+    static bool isIntegral(std::string_view type) {
+        static const std::unordered_set<std::string_view> types = {
+            "bool", "byte", "uint8", "int8", "uint16", "int16",
+            "uint32", "int32", "uint64", "int64", "size_t",
+        };
+        return types.contains(type);
     }
 
     static std::string lengthExpr(const Field& field,

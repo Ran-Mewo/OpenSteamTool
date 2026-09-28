@@ -1,7 +1,8 @@
 #ifndef DLLMAIN_H
 #define DLLMAIN_H
 
-#include <windows.h>
+#include "OSTPlatform/include/DynamicLibrary.h"
+
 #include <string>
 #include <fstream>
 #include <filesystem>
@@ -18,21 +19,23 @@
 #include "Steam/Enums.h"
 #include "Steam/Structs.h"
 #include "Steam/Callback.h"
-#include "Utils/LuaConfig.h"
-#include "Utils/Log.h"
-#include "Utils/Config.h"
+#include "Utils/Config/LuaConfig.h"
+#include "Utils/Logging/Log.h"
+#include "Utils/Config/Config.h"
 
 
-inline HMODULE client_hModule = nullptr;
-inline HMODULE ui_hModule = nullptr;
+inline OSTPlatform::DynamicLibrary::ModuleHandle client_hModule = nullptr;
+inline OSTPlatform::DynamicLibrary::ModuleHandle ui_hModule = nullptr;
 
-inline char SteamInstallPath[MAX_PATH] = {};
-inline char SteamclientPath[MAX_PATH] = {};
-inline char SteamUIPath[MAX_PATH]      = {};
-inline char DiversionPath[MAX_PATH]    = {};
-inline char LuaDir[MAX_PATH]           = {};
-inline char ConfigPath[MAX_PATH]       = {};
-inline char PayloadPath[MAX_PATH]      = {};
+inline constexpr size_t kRuntimePathCapacity = 260;
+
+inline char SteamInstallPath[kRuntimePathCapacity] = {};
+inline char SteamclientPath[kRuntimePathCapacity]  = {};
+inline char SteamUIPath[kRuntimePathCapacity]      = {};
+inline char DiversionPath[kRuntimePathCapacity]    = {};
+inline char LuaDir[kRuntimePathCapacity]           = {};
+inline char ConfigPath[kRuntimePathCapacity]       = {};
+inline char PayloadPath[kRuntimePathCapacity]      = {};
 
 // The fake AppId used by -onlinefix (SpaceWar).
 constexpr AppId_t kOnlineFixAppId = 480;

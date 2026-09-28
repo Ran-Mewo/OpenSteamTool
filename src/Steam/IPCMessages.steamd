@@ -86,6 +86,16 @@ struct IPCResponseHeader {
 protocol IPC {
     request IPCRequestHeader;
 
+    command IPCHandshake = EIPCCommand::Handshake {
+        request {
+            uint32 version;
+            uint32 pid;
+            uint32 tid;
+        }
+
+        response none;
+    }
+
     command IPCInterfaceCall = EIPCCommand::InterfaceCall {
         request {
             IPCInterfaceCallHeader header;
@@ -119,6 +129,7 @@ interface IClientUser {
     );
 
     bool GetEncryptedAppTicket(
+        in  uint32 cbMaxTicket,
         out uint32 pcbTicket,
         out bytes  pTicket[pcbTicket]
     );

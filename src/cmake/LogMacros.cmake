@@ -1,14 +1,14 @@
 # Generate per-module LOG_XXX_TRACE/DEBUG/INFO/WARN/ERROR macros from
-# ost_log_modules.h so that adding a new module only requires one line
-# in ost_log_modules.h — Log.h never needs to change.
+# LogModules.def so that adding a new module only requires one line
+# there — Log.h never needs to change.
 #
 # Output: ${CMAKE_CURRENT_BINARY_DIR}/generated/ost_log_macros.h
 
-set(_log_modules_h "${CMAKE_CURRENT_SOURCE_DIR}/Utils/ost_log_modules.h")
+set(_log_modules_h "${CMAKE_CURRENT_SOURCE_DIR}/Utils/Logging/LogModules.def")
 set(_log_macros_out "${CMAKE_CURRENT_BINARY_DIR}/generated/ost_log_macros.h")
 
 file(STRINGS "${_log_modules_h}" _lines REGEX "^OST_MOD\\(")
-string(REGEX MATCHALL "OST_MOD\\([A-Za-z_]+" _matches "${_lines}")
+string(REGEX MATCHALL "OST_MOD\\([A-Za-z_][A-Za-z0-9_]*" _matches "${_lines}")
 
 set(_debug "")
 set(_release "")
@@ -33,7 +33,7 @@ foreach(_m ${_matches})
 endforeach()
 
 set(_new_content
-"// Auto-generated from ost_log_modules.h -- DO NOT EDIT\n\
+"// Auto-generated from LogModules.def -- DO NOT EDIT\n\
 #pragma once\n\n\
 #ifdef OPENSTEAMTOOL_LOGGING_ENABLED\n\n\
 ${_debug}\

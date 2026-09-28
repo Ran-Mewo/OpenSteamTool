@@ -4,6 +4,7 @@
 #include "Hooks_KeyValues.h"
 #include "HookMacros.h"
 #include "dllmain.h"
+#include "OSTPlatform/include/DynamicLibrary.h"
 
 namespace {
 
@@ -15,9 +16,10 @@ namespace {
     // ── KeyValuesSystem — symbol ↔ string (from vstdlib_s64.dll) ───
     IKeyValuesSystem* GetKeyValuesSystem() {
         static IKeyValuesSystem* sys = []() -> IKeyValuesSystem* {
-            HMODULE vstdlib = GetModuleHandleW(L"vstdlib_s64.dll");
+            auto vstdlib = OSTPlatform::DynamicLibrary::GetLoaded("vstdlib_s64.dll");
             if (!vstdlib) return nullptr;
-            auto pfn = (KeyValuesSystemSteam_t)GetProcAddress(vstdlib, "KeyValuesSystemSteam");
+            auto pfn = reinterpret_cast<KeyValuesSystemSteam_t>(
+                OSTPlatform::DynamicLibrary::GetSymbol(vstdlib, "KeyValuesSystemSteam"));
             return pfn ? pfn() : nullptr;
         }();
         return sys;
