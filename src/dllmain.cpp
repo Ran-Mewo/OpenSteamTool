@@ -9,10 +9,6 @@
 #include "Utils/SteamMetadata/PatternLoader.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 #include "Utils/Tokeer/TokeerBridge.h"
-#ifdef OST_ENABLE_UPDATER
-#include "Utils/Update/AppUpdater.h"
-#endif
-#include "OSTPlatform/include/Dialog.h"
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Thread.h"
 
@@ -103,35 +99,6 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     // Register the bst:// URI scheme so the website can drive code redemption via this
     // DLL (rundll32 handler). HKCU, no admin; idempotent.
     TokeerBridge::RegisterUriScheme(std::string(SteamInstallPath) + "\\OpenSteamTool.dll");
-
-    // Optional self-update check. Runs on its own detached thread so the network
-    // round-trip never delays hook installation; a staged DLL applies next launch.
-    //
-    // Compiled out entirely by -DOST_ENABLE_UPDATER=OFF. That is deliberately a
-    // build-time cut rather than a runtime one: a pinned or private build should
-    // not be replaceable by flipping [update] in opensteamtool.toml, and with the
-    // updater absent the DLL makes no update request at all.
-#ifdef OST_ENABLE_UPDATER
-    if (Config::GetUpdateEnabled()) {
-        OSTPlatform::Thread::StartDetached([] () -> uint32_t {
-            const std::string self = std::string(SteamInstallPath) + "\\OpenSteamTool.dll";
-            AppUpdater::CleanupStagedBackup(self);
-
-            const AppUpdater::CheckResult upd = AppUpdater::Check();
-            if (!upd.updateAvailable) return 0;
-            if (!AppUpdater::DownloadAndStage(upd, self)) return 0;
-
-            const bool restart = OSTPlatform::Dialog::ShowConfirm(
-                "BetterSteamTools Updated!",
-                upd.oldVersion + " -> " + upd.newVersion +
-                "\n\nRestart Steam now to apply?");
-            if (restart) AppUpdater::RestartSteam();
-            return 0;
-        });
-    }
-#else
-    LOG_INFO("Self-updater not compiled in (OST_ENABLE_UPDATER=OFF)");
-#endif
 
     LOG_INFO("OpenSteamTool init complete");
     return 0;

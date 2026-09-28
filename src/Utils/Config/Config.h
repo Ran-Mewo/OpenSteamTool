@@ -45,7 +45,6 @@ namespace Config {
     std::vector<std::string> GetRemoteUrlTemplates();
     CloudSettings GetCloudSettings();
     bool GetStatsEnableApi();
-    bool GetUpdateEnabled();
     bool GetOnlineFixEnabled();
 
     // [donate] — contribute manifest request codes for depots this account owns.
@@ -80,9 +79,6 @@ namespace Config {
 
     // [stats]
     inline bool statsEnableApi = true;
-
-    // [update] - self-update check on startup (staged for next Steam launch).
-    inline bool updateEnabled = true;
 
     // [donate] - mint manifest request codes on request for depots this account
     // owns. Codes are bound to (depot, manifest) and rotate within minutes, so

@@ -428,40 +428,4 @@ bool IsSystemModulePath(const std::string& path) {
     return NormalizePathForCompare(path).starts_with(systemDir);
 }
 
-bool LaunchDetachedHidden(const std::string& commandLine) {
-    const std::wstring wide = Encoding::Utf8ToWide(commandLine);
-    // CreateProcessW may write into the command-line buffer, so hand it a mutable copy.
-    std::vector<wchar_t> buffer(wide.begin(), wide.end());
-    buffer.push_back(L'\0');
-
-    STARTUPINFOW si{};
-    si.cb          = sizeof(si);
-    si.dwFlags     = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    // Run the helper in a hidden console (CREATE_NO_WINDOW — no flash, no window). It
-    // still outlives the caller: process lifetimes are independent. Do NOT combine
-    // DETACHED_PROCESS with CREATE_NO_WINDOW — they are contradictory console flags and
-    // leave the helper's own child processes with broken handles. Try
-    // CREATE_BREAKAWAY_FROM_JOB first so a kill-on-close job (if Steam is in one) can't
-    // take the helper down, then fall back if the job forbids breakaway.
-    for (DWORD extra : { DWORD{CREATE_BREAKAWAY_FROM_JOB}, DWORD{0} }) {
-        std::vector<wchar_t> cmd = buffer;   // fresh mutable copy per attempt
-        PROCESS_INFORMATION pi{};
-        const BOOL ok = CreateProcessW(
-            nullptr, cmd.data(), nullptr, nullptr, FALSE,
-            CREATE_NO_WINDOW | extra,
-            nullptr, nullptr, &si, &pi);
-        if (ok) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            return true;
-        }
-        OSTP_LOG_DEBUG("LaunchDetachedHidden: CreateProcessW failed (extra=0x{:X}, error={})",
-                       extra, GetLastError());
-    }
-    OSTP_LOG_WARN("LaunchDetachedHidden: could not launch '{}'", commandLine);
-    return false;
-}
-
 } // namespace OSTPlatform::Process

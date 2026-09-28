@@ -116,14 +116,12 @@ add_library(OpenSteamTool SHARED
     Utils/SteamMetadata/ManifestClient.cpp
     Utils/SteamMetadata/ManifestCache.cpp
     Utils/SteamMetadata/ManifestDonor.cpp
-    Utils/SteamMetadata/Mirror.cpp
     Utils/SteamMetadata/PatternLoader.cpp
     Utils/SteamMetadata/RemoteToml.cpp
     Utils/SteamMetadata/StatsClient.cpp
     Utils/SteamMetadata/SteamDiagnostics.cpp
     Utils/Tokeer/TokeerBridge.cpp
     Utils/Tokeer/TokeerUri.cpp
-    Utils/Update/AppUpdater.cpp
 
     # Pipe subsystem: generic handshake registry + ProcessInspector core, plus
     # self-contained features that own their primitives.
@@ -192,20 +190,6 @@ set(OST_ETICKET_URL "" CACHE STRING
 if(OST_ETICKET_URL)
     target_compile_definitions(OpenSteamTool PRIVATE
         OST_ETICKET_URL="${OST_ETICKET_URL}")
-endif()
-
-# Self-update. On by default; the updater checks for a newer DLL on a detached
-# thread at startup and stages it for the next launch. Turn it off to produce a
-# build that never checks and never phones home:
-#
-#   cmake -B build -DOST_ENABLE_UPDATER=OFF
-#
-# This is a compile-time cut, not a runtime setting: with it off, the updater is
-# not reachable at all and [update] enabled in opensteamtool.toml has no effect.
-# Use it for private or pinned builds that must not be replaced under the user.
-option(OST_ENABLE_UPDATER "Compile in the self-updater" ON)
-if(OST_ENABLE_UPDATER)
-    target_compile_definitions(OpenSteamTool PRIVATE OST_ENABLE_UPDATER)
 endif()
 
 # Base URL of the Tokeer code server used by the bst:// bridge (code redemption).
