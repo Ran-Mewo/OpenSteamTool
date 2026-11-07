@@ -4,11 +4,8 @@
 
 namespace RemoteInject {
 
-    // Load a DLL into another process by running kernel32!LoadLibraryW on a
-    // remote thread inside it. Windows loads kernel32 at the same address in
-    // every process until the next reboot, so a LoadLibraryW pointer resolved
-    // here is valid in the target. Header-only because the host DLL and the
-    // payload run in separate processes and can't share compiled code.
+    // Load a DLL into another process by running kernel32!LoadLibraryW on a remote thread inside it.
+    // kernel32 sits at the same address in every process until reboot, so this works even before a suspended process's loader has run.
     inline bool LoadDll(HANDLE proc, LPCWSTR dllPath) {
         auto loadLib = reinterpret_cast<LPTHREAD_START_ROUTINE>(
             GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));

@@ -101,12 +101,13 @@ The `extract_tickets` tool dumps the `AppTicket` and `ETicket` hex strings you n
 
 ### Online Fix
 - Add `-onlinefix` to the Steam launch parameters to enable 480-based online play in games that use lobby matchmaking. The current limitation is that only one such game can run at a time.To revert, simply remove -onlinefix from the launch parameters — online play returns to normal on the next launch.
-- Games that use EOS matchmaking instead of Steam are also supported.
-- Add `-realappid` alongside `-onlinefix` if the game **launches but then hangs, black-screens or misbehaves after login**.
+- An injected payload (see [Third-party DLL injection](#third-party-dll-injection)) can choose which AppId the game is told it is running as, by writing a `uint32` to the shared memory block `OpenSteamTool_AppIdStrategy_<pid>`:
 
-  Once P2P starts, `-onlinefix` normally reports the fake AppId (480) when the game asks Steam *which game am I* — some titles need that for their networking to line up. Others read the same answer during startup, get 480 instead of their own AppId, and break on it. `-realappid` keeps the 480 spoof everywhere else (so ownership and matchmaking still work) while answering that one question honestly.
+  - `0` (default) — the real AppId until the game starts Steam P2P, then 480 to match its networking cert.
+  - `1` — always 480.
+  - `2` — always the real AppId.
 
-  Known to need it: Bodycam (2406770). If a game works without it, leave it off.
+- The game itself runs under AppId 480, so OpenSteamTool publishes its real AppId as a `uint32` in the shared memory block `OpenSteamTool_RealAppId_<pid>` for an injected payload to read.
 
 ## Future
 - Steam Cloud synchronization support.(This is a huge project)
@@ -195,16 +196,11 @@ enabled = true
 # Optional metadata mirror. See "Steam version compatibility" below.
 [remote]
 # url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
-
-# Disable in-game payload injection used by -onlinefix (EOS matchmaking).
-# The 480 AppId swap for Steam-matchmaking games is unaffected.
-[onlinefix]
-enabled = true
 ```
 
 ### Third-party DLL injection
 
-OpenSteamTool can load third-party DLLs into game processes. Each `[[inject]]` entry is injected when every condition it sets matches the launch; matching entries are injected in listed order.
+OpenSteamTool can load third-party DLLs into game processes. Each `[[inject]]` entry is injected when every condition it sets matches the launch; matching entries are injected in listed order. DLLs load at launch, before the game runs any code; a process the game starts later (for example behind a launcher stub) gets them when it connects to Steam.
 
 | Key | Explanation |
 |-----|---------|
@@ -215,8 +211,9 @@ OpenSteamTool can load third-party DLLs into game processes. Each `[[inject]]` e
 
 ```toml
 [[inject]]
-path = "OnlineFix.dll"
+path = "payload.dll"
 when_cmdline = "-onlinefix"
+all_games = true
 ```
 
 ### Manifest via Lua

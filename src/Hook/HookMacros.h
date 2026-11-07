@@ -44,9 +44,9 @@
     
 // ── install ─────────────────────────────────────────────────────
 // Call between HOOK_BEGIN / HOOK_END.
-#define INSTALL_HOOK(module, name)                                    \
+#define INSTALL_HOOK_AT(name, address)                                \
 do {                                                              \
-    void* _p_ = PatternLoader::FindPattern(module, #name);         \
+    void* _p_ = (address);                                        \
     if (_p_) {                                                    \
         o##name = (name##_t)_p_;                                  \
         if (!OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&o##name), reinterpret_cast<void*>(hk##name))) { \
@@ -54,6 +54,8 @@ do {                                                              \
         }                                                         \
     }                                                             \
 } while (0)
+
+#define INSTALL_HOOK(module, name)      INSTALL_HOOK_AT(name, PatternLoader::FindPattern(module, #name))
 
 #define INSTALL_HOOK_C(name)            INSTALL_HOOK(client_hModule, name)
 #define INSTALL_HOOK_U(name)            INSTALL_HOOK(ui_hModule, name)

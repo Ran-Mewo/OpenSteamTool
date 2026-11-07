@@ -6,6 +6,7 @@
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 #include "Utils/Support/FnvHash.h"
 
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
@@ -265,6 +266,63 @@ void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* 
     }
 
     g_missingFunctions.emplace_back(funcName);
+    return nullptr;
+}
+
+void** FindVTable(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* className)
+{
+    const auto image = OSTPlatform::Memory::GetModuleImage(module);
+    if (!image) return nullptr;
+    const uint8_t* base = image->base;
+    const size_t size = image->size;
+    const std::string name = std::string(".?AV") + className + "@@";
+
+    // TypeDescriptor { vftable*, spare*, char name[] }
+    for (size_t n = 16; n + name.size() < size; n += 8) {
+        if (std::memcmp(base + n, name.c_str(), name.size() + 1) != 0) continue;
+        const uint32_t tdRva = static_cast<uint32_t>(n - 16);
+
+        // CompleteObjectLocator { signature 1, offset 0 (primary), cdOffset, pTypeDescriptor, pClassDescriptor, pSelf }, then the vtable.
+        for (size_t c = 0; c + 24 <= size; c += 4) {
+            uint32_t col[6];
+            std::memcpy(col, base + c, sizeof(col));
+            if (col[0] != 1 || col[1] != 0 || col[3] != tdRva || col[5] != c) continue;
+            const uint64_t colVa = reinterpret_cast<uintptr_t>(base) + c;
+            for (size_t v = 0; v + 16 <= size; v += 8)
+                if (std::memcmp(base + v, &colVa, sizeof(colVa)) == 0)
+                    return reinterpret_cast<void**>(const_cast<uint8_t*>(base + v + 8));
+        }
+    }
+    LOG_WARN("PatternLoader: no vtable for class '{}'", className);
+    return nullptr;
+}
+
+void** FindVirtualReferencing(OSTPlatform::DynamicLibrary::ModuleHandle module, void** vtable, const void* target)
+{
+    const auto image = OSTPlatform::Memory::GetModuleImage(module);
+    if (!image || !vtable || !target) return nullptr;
+    for (void** slot = vtable; *slot >= image->base && *slot < image->base + image->size; ++slot) {
+        const auto body = OSTPlatform::Memory::FunctionBody(*slot);
+        for (size_t i = 0; i + 7 <= body.size(); ++i) {
+            if ((body[i] & 0xFB) != 0x48 || body[i + 1] != 0x8D || (body[i + 2] & 0xC7) != 0x05) continue;   // lea r64, [rip+disp32]
+            int32_t disp;
+            std::memcpy(&disp, body.data() + i + 3, sizeof(disp));
+            if (body.data() + i + 7 + disp == target) return slot;
+        }
+    }
+    return nullptr;
+}
+
+void** FindVirtualNamed(OSTPlatform::DynamicLibrary::ModuleHandle module, void** vtable, const char* name)
+{
+    const auto image = OSTPlatform::Memory::GetModuleImage(module);
+    if (!image || !vtable || !name) return nullptr;
+    // Whole strings only; the binary may hold several copies.
+    const std::string_view text(reinterpret_cast<const char*>(image->base), image->size);
+    const std::string_view needle(name, std::strlen(name) + 1);
+    for (size_t at = text.find(needle); at != std::string_view::npos; at = text.find(needle, at + 1))
+        if (at > 0 && text[at - 1] == 0)
+            if (void** slot = FindVirtualReferencing(module, vtable, text.data() + at)) return slot;
     return nullptr;
 }
 

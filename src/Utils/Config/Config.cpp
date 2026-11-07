@@ -18,7 +18,6 @@ namespace {
         std::vector<std::string> luaPaths;
         std::vector<std::string> remoteUrlTemplates;
         bool statsEnableApi = true;
-        bool onlineFixEnabled = true;
         DonateSettings donate;
         std::vector<InjectDll> injectDlls;
         CloudSettings cloud;
@@ -55,7 +54,6 @@ namespace {
         luaPaths               = snapshot.luaPaths;
         remoteUrlTemplates     = snapshot.remoteUrlTemplates;
         statsEnableApi         = snapshot.statsEnableApi;
-        onlineFixEnabled       = snapshot.onlineFixEnabled;
         donate                 = snapshot.donate;
         injectDlls             = snapshot.injectDlls;
         cloudEnabled           = snapshot.cloud.enabled;
@@ -180,16 +178,6 @@ namespace {
                 readClamped("wanted_refresh_secs",  30,  86400, snapshot.donate.wantedRefreshSecs);
             }
 
-            // [onlinefix]
-            if (auto inject = tbl["inject"].as_table()) {
-                if (auto val = (*inject)["enabled"].value<bool>())
-                    snapshot.onlineFixEnabled = *val;
-            }
-            if (auto onlinefix = tbl["onlinefix"].as_table()) {
-                if (auto val = (*onlinefix)["enabled"].value<bool>())
-                    snapshot.onlineFixEnabled = *val;
-            }
-
             // [[inject]]
             if (auto arr = tbl["inject"].as_array()) {
                 std::filesystem::path steamDir = std::filesystem::path(configPath).parent_path();
@@ -295,11 +283,6 @@ namespace {
     DonateSettings GetDonateSettings() {
         std::lock_guard lock(g_mutex);
         return donate;
-    }
-
-    bool GetOnlineFixEnabled() {
-        std::lock_guard lock(g_mutex);
-        return onlineFixEnabled;
     }
 
     CloudSettings GetCloudSettings() {

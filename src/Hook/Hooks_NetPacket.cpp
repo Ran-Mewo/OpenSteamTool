@@ -53,7 +53,7 @@ namespace {
     uint8  g_RecvPacketPool[kPacketPoolSize][kMaxPacketSize];
     int    g_RecvPacketPoolIdx = 0;
 
-    // ── Outgoing (BBuildAndAsyncSendFrame) — same pattern ───────
+    // ── Outgoing (WebSocket and UDP/TCP sends) — same pattern ───────
     uint8  g_SendNewBody[kMaxBodySize];
     uint32 g_cbSendNewBody = 0;
     bool   g_NeedReplaceSend = false;
@@ -1395,9 +1395,7 @@ namespace Hooks_NetPacket_RichPresence {
                 msg.games_played(msg.games_played_size() - 1).game_id() & UINT32_MAX);
         }
 
-        // Only track when the topmost is an unlocked AppId we can inject for.
-        // Owned games on top let the server's natural broadcast paint the
-        // cache; -onlinefix games are already handled by the OnlineFix path.
+        // Track the topmost unlocked AppId we can inject presence for.
         AppId_t newTracked = 0;
         if (topmost != 0 && topmost != kOnlineFixAppId && LuaConfig::HasDepot(topmost))
             newTracked = topmost;
@@ -1445,8 +1443,8 @@ namespace Hooks_NetPacket_RichPresence {
         if (!selfEntry) return false;
 
         LOG_RICHPRESENCE_DEBUG(
-            "Recv self PersonaState: status_flags=0x{:X} friends_size={}",
-            msg.status_flags(), msg.friends_size());
+            "Recv self PersonaState: status_flags=0x{:X} friends_size={} app={} lobby={}",
+            msg.status_flags(), msg.friends_size(), selfEntry->game_played_app_id(), selfEntry->game_lobby_id());
 
         if (cbHdr <= sizeof(g_SelfHdr) && cbBody <= sizeof(g_SelfBody)) {
             memcpy(g_SelfHdr,  pHdr,  cbHdr);
@@ -1514,30 +1512,47 @@ namespace Hooks_NetPacket_OnlineFix {
         }
         LOG_ONLINEFIX_DEBUG("OnlineFix: original body:\n{}", msg.DebugString());
 
+        bool modified = false;
+        const AppId_t realAppId = Hooks_Misc::ResolveAppId();
+
+        // Steam invites to the last games_played entry; put 480 there so friends join Spacewar, not the real appid they don't own.
+        if (realAppId && realAppId != kOnlineFixAppId) {
+            auto* games = msg.mutable_games_played();
+            int idx480 = -1;
+            for (int i = 0; i < games->size(); ++i)
+                if ((games->Get(i).game_id() & UINT32_MAX) == kOnlineFixAppId) { idx480 = i; break; }
+            // Steam shows the real appid's entry when both are listed, so give it the 480 entry's lobby too or Invite to Game disappears.
+            if (idx480 >= 0 && games->Get(idx480).has_game_data_blob())
+                for (auto& game : *games)
+                    if ((game.game_id() & UINT32_MAX) == realAppId && game.game_data_blob() != games->Get(idx480).game_data_blob()) {
+                        game.set_game_data_blob(games->Get(idx480).game_data_blob());
+                        modified = true;
+                    }
+            if (idx480 >= 0 && idx480 != games->size() - 1) {
+                games->SwapElements(idx480, games->size() - 1);
+                modified = true;
+            }
+        }
+
         Hooks_NetPacket_RichPresence::TrackSend(msg, pHdr, cbHdr);
 
-        bool patched = false;
         for (int i = 0; i < msg.games_played_size(); ++i) {
             auto* game = msg.mutable_games_played(i);
             AppId_t appid = static_cast<AppId_t>(game->game_id() & UINT32_MAX);
 
             // SpawnProcess rewrites pGameID to 480, so game_id is already 480.
             // Fill game_extra_info with the real game name.
-            if (appid == kOnlineFixAppId) {
-                AppId_t realAppId = Hooks_Misc::ResolveAppId();
-                if (realAppId && realAppId != kOnlineFixAppId) {
-                    std::string name = Hooks_Misc::GetGameNameByAppID(realAppId);
-                    if (!name.empty()) {
-                        game->set_game_extra_info(name);
-                        patched = true;
-                        LOG_ONLINEFIX_INFO("OnlineFix: 480 -> name '{}' (real appid {})",
-                            name, realAppId);
-                    }
+            if (appid == kOnlineFixAppId && realAppId && realAppId != kOnlineFixAppId) {
+                std::string name = Hooks_Misc::GetGameNameByAppID(realAppId);
+                if (!name.empty()) {
+                    game->set_game_extra_info(name);
+                    modified = true;
+                    LOG_ONLINEFIX_INFO("OnlineFix: 480 -> name '{}' (real appid {})", name, realAppId);
                 }
             }
         }
 
-        if (!patched) return false;
+        if (!modified) return false;
 
         g_cbSendNewBody = static_cast<uint32>(msg.ByteSizeLong());
         if (g_cbSendNewBody > kMaxBodySize) {
@@ -1554,6 +1569,81 @@ namespace Hooks_NetPacket_OnlineFix {
     }
 
 } // namespace Hooks_NetPacket_OnlineFix
+
+
+// ════════════════════════════════════════════════════════════════
+//  Hooks_NetPacket_NetCert
+//
+//  Outgoing: CMsgClientNetworkingCertRequest (eMsg 5621)
+//
+//  This is the SDR / SteamNetworkingSockets networking-cert request the Steam client sends to the CM. The CM issues the cert ONLY if the account owns
+//  the requested AppID, so a cracked non-owner's request for the real appid is denied and its P2P/relay endpoint never registers (packets are
+//  silently dropped — the entire join-tunnel failure). Rewrite the appid to 480 (Spacewar, owned by every account) so the CM issues a valid,
+//  universally-usable SDR cert; every other surface stays on the real appid.
+//
+//  This is the ONE 480 surface OST's other spoofs (games_played, GetAppID, GetAppIDForCurrentPipe) never reached. Scoped to the active -onlinefix
+//  game's own request (appid == the real appid) so the Steam client's own SDR cert (voice / Remote Play) and other games are never rebound.
+// ════════════════════════════════════════════════════════════════
+namespace Hooks_NetPacket_NetCert {
+
+    bool HandleSend(const uint8* pBody, uint32 cbBody)
+    {
+        const bool active = Hooks_Misc::IsOnlineFixActive();
+        const AppId_t real = Hooks_Misc::ResolveAppId();
+        LOG_ONLINEFIX_DEBUG("NetworkingCertRequest: active={} real={} body={:n}", active, real, spdlog::to_hex(pBody, pBody + cbBody));
+        if (!active || !real || real == kOnlineFixAppId) return false;
+
+        // Copy every field verbatim but the top-level varint holding the real appid, which becomes 480: no field number to depend on.
+        uint32 pos = 0, w = 0;
+        bool changed = false;
+        auto readVarint = [&](uint64& out) -> bool {
+            out = 0; int s = 0;
+            while (pos < cbBody) {
+                uint8 b = pBody[pos++];
+                out |= static_cast<uint64>(b & 0x7F) << s;
+                if (!(b & 0x80)) return true;
+                s += 7; if (s >= 64) return false;
+            }
+            return false;
+        };
+        auto putVarint = [&](uint64 v) {
+            do { uint8 b = v & 0x7F; v >>= 7; if (v) b |= 0x80; if (w < kMaxBodySize) g_SendNewBody[w++] = b; } while (v);
+        };
+        auto copy = [&](uint32 from, uint32 to) {
+            for (uint32 i = from; i < to; ++i) if (w < kMaxBodySize) g_SendNewBody[w++] = pBody[i];
+        };
+        while (pos < cbBody) {
+            const uint32 tagStart = pos;
+            uint64 tag;
+            if (!readVarint(tag)) return false;
+            copy(tagStart, pos);                       // tag bytes
+            const uint32 wire = static_cast<uint32>(tag & 7);
+            if (wire == 0) {                           // varint value
+                uint64 v; if (!readVarint(v)) return false;
+                if (!changed && v == static_cast<uint64>(real)) { putVarint(kOnlineFixAppId); changed = true; }
+                else putVarint(v);
+            } else if (wire == 2) {                    // length-delimited
+                const uint32 lenStart = pos;
+                uint64 len; if (!readVarint(len)) return false;
+                copy(lenStart, pos);                   // length bytes
+                if (pos + len > cbBody) return false;
+                copy(pos, pos + static_cast<uint32>(len));
+                pos += static_cast<uint32>(len);
+            } else if (wire == 1) {                    // 64-bit
+                if (pos + 8 > cbBody) return false; copy(pos, pos + 8); pos += 8;
+            } else if (wire == 5) {                    // 32-bit
+                if (pos + 4 > cbBody) return false; copy(pos, pos + 4); pos += 4;
+            } else {
+                return false;                          // groups/unknown — bail (leave unmodified)
+            }
+        }
+        if (!changed || w > kMaxBodySize) return false;
+        g_cbSendNewBody = w;
+        LOG_ONLINEFIX_INFO("NetworkingCertRequest: appid {} -> {} (mint SDR cert under Spacewar)", real, kOnlineFixAppId);
+        return true;
+    }
+
+} // namespace Hooks_NetPacket_NetCert
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1895,6 +1985,10 @@ namespace {
             g_NeedReplaceSend = Hooks_NetPacket_OnlineFix::HandleSend(pBody, cbBody, pHdr, cbHdr);
             return;
 
+        case k_EMsgClientNetworkingCertRequest:        // 5621 (SDR/P2P networking cert)
+            g_NeedReplaceSend = Hooks_NetPacket_NetCert::HandleSend(pBody, cbBody);
+            return;
+
         case k_EMsgClientRichPresenceUpload:           // 7501
             Hooks_NetPacket_RichPresence::TrackRPSend(pBody, cbBody);
             return;
@@ -2003,6 +2097,33 @@ namespace {
     //  Hooks
     // ════════════════════════════════════════════════════════════
 
+    // Shared by both send hooks. Returns the message to send (original or rewritten), or nullptr if it was answered locally.
+    const uint8* OnSend(const uint8* pubData, uint32 cubData, uint32& cbOut)
+    {
+        cbOut = cubData;
+
+        // Legacy CD-key request (EMsg 730) isn't protobuf. Answer it locally only once Drain() can deliver the reply.
+        if (cubData >= sizeof(ExtendedMsgHdr) && NetPkt::IsResolved()) {
+            const uint32 rawEMsg = *reinterpret_cast<const uint32*>(pubData);
+            if (!(rawEMsg & kMsgHdrProtoFlag) && static_cast<EMsg>(rawEMsg) == k_EMsgClientGetLegacyGameKey &&
+                Hooks_NetPacket_LegacyKey::HandleSend(pubData, cubData))
+                return nullptr;
+        }
+
+        EMsg eMsg;
+        const uint8 *pHdr, *pBody;
+        uint32 cbHdr, cbBody;
+        if (!UnpackRaw(pubData, cubData, eMsg, pHdr, cbHdr, pBody, cbBody)) return pubData;
+
+        SendJob(eMsg, pBody, cbBody, pHdr, cbHdr);
+        if (g_SuppressSend) return nullptr;   // CloudRedirect answered this RPC locally
+        if (!g_NeedReplaceSend) return pubData;
+
+        const uint8* buf = ReplaceSendPacket(pubData, cbHdr, pHdr, g_SendNewBody, g_cbSendNewBody, &cbOut);
+        if (!buf) cbOut = cubData;
+        return buf ? buf : pubData;
+    }
+
     HOOK_FUNC(BBuildAndAsyncSendFrame, bool,
               void* pObject, EWebSocketOpCode eWebSocketOpCode,
               uint8* pubData, uint32 cubData)
@@ -2016,51 +2137,32 @@ namespace {
         Hooks_NetPacket_ManifestProbe::CaptureContext(
             pObject, oBBuildAndAsyncSendFrame, nullptr, 0);
 
-        // Legacy CD-key request (EMsg 730) is a non-proto struct message that
-        // UnpackRaw skips. Intercept it here: if we answer it locally, suppress
-        // the real send (the 785 response is delivered from the RecvPkt hook).
-        // As with the cloud path above: answering locally means the reply is
-        // delivered by Drain() from the RecvPkt hook, which is inert until the
-        // packet layout is identified. Let the request go out normally until
-        // then, or the "Updating product key" dialog waits on a reply that is
-        // never delivered.
-        if (cubData >= sizeof(ExtendedMsgHdr) && NetPkt::IsResolved()) {
-            const uint32 rawEMsg = *reinterpret_cast<const uint32*>(pubData);
-            if (!(rawEMsg & kMsgHdrProtoFlag) &&
-                static_cast<EMsg>(rawEMsg) == k_EMsgClientGetLegacyGameKey &&
-                Hooks_NetPacket_LegacyKey::HandleSend(pubData, cubData)) {
-                return true;   // answered locally; report success so Steam treats it as sent
-            }
-        }
+        uint32 cbOut;
+        const uint8* out = OnSend(pubData, cubData, cbOut);
+        if (!out) return true;   // report success so Steam treats the frame as sent
+        return oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, const_cast<uint8*>(out), cbOut);
+    }
 
-        EMsg eMsg;
-        const uint8 *pHdr, *pBody;
-        uint32 cbHdr, cbBody;
-        bool result;
-        if (UnpackRaw(pubData, cubData, eMsg, pHdr, cbHdr, pBody, cbBody)) {
-            SendJob(eMsg, pBody, cbBody, pHdr, cbHdr);
+    // UDP/TCP counterpart of BBuildAndAsyncSendFrame: every CM message passes through here before encryption.
+    HOOK_FUNC(EncryptedSend, bool, void* pFilter, const uint8* pubData, int32 cubData, bool bDatagram)
+    {
+        if (bDatagram || cubData <= 0) return oEncryptedSend(pFilter, pubData, cubData, bDatagram);
+        uint32 cbOut;
+        const uint8* out = OnSend(pubData, static_cast<uint32>(cubData), cbOut);
+        if (!out) return true;
+        return oEncryptedSend(pFilter, out, static_cast<int32>(cbOut), bDatagram);
+    }
 
-            if (g_SuppressSend) {
-                // CloudRedirect answered this RPC locally; do not forward to
-                // Valve. Report success so Steam treats the frame as sent.
-                return true;
-            }
-
-            if (g_NeedReplaceSend) {
-                uint32 newSize = 0;
-                uint8* buf = ReplaceSendPacket(pubData, cbHdr, pHdr,
-                                               g_SendNewBody, g_cbSendNewBody, &newSize);
-                result = buf
-                    ? oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, buf, newSize)
-                    : oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
-            } else {
-                result = oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
-            }
-        } else {
-            result = oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
-        }
-
-        return result;
+    // The CNetFilterEncryption virtual that queues a CWorkItemNetFilterEncrypt, found through RTTI.
+    void* FindEncryptedSend()
+    {
+        void** filter   = PatternLoader::FindVTable(client_hModule, "CNetFilterEncryption");
+        void** workItem = PatternLoader::FindVTable(client_hModule, "CWorkItemNetFilterEncrypt");
+        void** slot     = PatternLoader::FindVirtualReferencing(client_hModule, filter, workItem);
+        void* send      = slot ? *slot : nullptr;
+        if (send) LOG_NETPACKET_DEBUG("NetPacket: encrypted send at RVA 0x{:X}", reinterpret_cast<uintptr_t>(send) - reinterpret_cast<uintptr_t>(client_hModule));
+        else      LOG_WARN("NetPacket: CNetFilterEncryption send not found; UDP/TCP sends unhooked");
+        return send;
     }
 
     HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pPacket)
@@ -2129,12 +2231,14 @@ namespace Hooks_NetPacket {
         HOOK_BEGIN();
         INSTALL_HOOK_C(BBuildAndAsyncSendFrame);
         INSTALL_HOOK_C(RecvPkt);
+        INSTALL_HOOK_AT(EncryptedSend, FindEncryptedSend());
         HOOK_END();
     }
 
     void Uninstall() {
         UNHOOK_BEGIN();
         UNINSTALL_HOOK(BBuildAndAsyncSendFrame);
+        UNINSTALL_HOOK(EncryptedSend);
         UNINSTALL_HOOK(RecvPkt);
         UNHOOK_END();
     }

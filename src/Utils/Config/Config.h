@@ -45,7 +45,6 @@ namespace Config {
     std::vector<std::string> GetRemoteUrlTemplates();
     CloudSettings GetCloudSettings();
     bool GetStatsEnableApi();
-    bool GetOnlineFixEnabled();
 
     // [donate] — contribute manifest request codes for depots this account owns.
     struct DonateSettings {
@@ -85,9 +84,6 @@ namespace Config {
     // they are minted on demand and sent straight on, never stored. The caps
     // exist because this calls Steam as the signed-in user.
     inline DonateSettings donate;
-
-    // [onlinefix]
-    inline bool onlineFixEnabled = true;
 
     // [[inject]] - optional DLL injection into matching game processes.
     inline std::vector<InjectDll> injectDlls;

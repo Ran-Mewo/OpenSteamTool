@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace OSTPlatform::Memory {
 
@@ -15,6 +16,9 @@ namespace OSTPlatform::Memory {
 
     std::optional<ModuleImage> GetModuleImage(DynamicLibrary::ModuleHandle module);
     bool WriteExecutableByte(void* target, uint8_t value);
+
+    // Function bytes from the module's unwind table; empty if fn has no unwind entry.
+    std::span<const uint8_t> FunctionBody(const void* fn);
 
     // True when [addr, addr + bytes) is entirely committed and readable in this
     // process. For probing a pointer of unknown provenance before dereferencing

@@ -35,7 +35,6 @@ inline char SteamUIPath[kRuntimePathCapacity]      = {};
 inline char DiversionPath[kRuntimePathCapacity]    = {};
 inline char LuaDir[kRuntimePathCapacity]           = {};
 inline char ConfigPath[kRuntimePathCapacity]       = {};
-inline char PayloadPath[kRuntimePathCapacity]      = {};
 
 // The fake AppId used by -onlinefix (SpaceWar).
 constexpr AppId_t kOnlineFixAppId = 480;

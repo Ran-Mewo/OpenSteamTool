@@ -105,15 +105,15 @@ namespace {
         PipeManager::OnHandshake(pipe);
     }
 
-    // Detect the first SteamNetworkingSockets call (interface 46) so GetAppID can
-    // flip to 480 for P2P games. Skipped once already seen or when not in onlinefix.
+    // Flip GetAppID to 480 on the first P2P networking call (interface 46, or legacy 12).
     static void DetectNetworkingSockets(CUtlBuffer* pRead) {
         if (!Hooks_Misc::IsOnlineFixActive() || Hooks_Misc::ShouldReportOnlineFixAppId()) return;
         IPCMessages::IPCRequest request{pRead};
         if (!request.ok() || request.command() != EIPCCommand::InterfaceCall) return;
         IPCMessages::IPCInterfaceCall call{request.body()};
         if (!call.ok()) return;
-        if (call.interfaceID() == EIPCInterface::IClientNetworkingSocketsSerialized)
+        const auto iface = call.interfaceID();
+        if (iface == EIPCInterface::IClientNetworkingSocketsSerialized || iface == EIPCInterface::IClientNetworking)
             Hooks_Misc::NotifyNetworkingSocketsUsed();
     }
 

@@ -25,13 +25,13 @@ namespace {
     }
 
     // [Post-Handler]: IClientUtils::GetAppID
-    //  SpawnProcess rewrites pGameID to 480 for OnlineFix games,
-    //  so steamclient returns 480.  Restore the real app_id.
-    //  GetAppID reads and updates the response steamclient pre-filled.
+    //  SpawnProcess rewrites pGameID to 480 for OnlineFix games, so steamclient returns 480. Restore the real app_id, unless the game relies on P2P,
+    //  where 480 must stay so its networking cert verifies. GetAppID reads and updates the response steamclient pre-filled.
     void HandlerPost_IClientUtils_GetAppID(CPipeClient* pipe, CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
-        // Once P2P is up, leave 480 so the socket matches the 480 session cert.
-        if (Hooks_Misc::ShouldReportOnlineFixAppId()) return;
+        const auto strat = Hooks_Misc::GetAppIdStrategy(pipe ? pipe->m_clientPID : 0);
+        if (strat == Hooks_Misc::kStrategyForce480) return;
+        if (strat == Hooks_Misc::kStrategyDefault && Hooks_Misc::ShouldReportOnlineFixAppId()) return;
 
         AppId_t realAppId = Hooks_Misc::ResolveAppId();
         if (!realAppId) return;

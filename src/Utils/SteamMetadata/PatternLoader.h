@@ -12,6 +12,15 @@ namespace PatternLoader {
     // Resolve by RVA first, then fall back to signature scanning.
     void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* funcName);
 
+    // Primary vtable of an MSVC class, found through its RTTI name.
+    void** FindVTable(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* className);
+
+    // Vtable slot whose virtual loads target (rip-relative lea).
+    void** FindVirtualReferencing(OSTPlatform::DynamicLibrary::ModuleHandle module, void** vtable, const void* target);
+
+    // Vtable slot whose virtual loads the string name. IPC proxies (IClient*Map) load the names of their methods.
+    void** FindVirtualNamed(OSTPlatform::DynamicLibrary::ModuleHandle module, void** vtable, const char* name);
+
     // Report unresolved functions after all hooks have been installed.
     void ReportMissingFunctions();
 

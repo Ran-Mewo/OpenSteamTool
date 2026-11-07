@@ -1,21 +1,24 @@
 #include "Hooks_Inject.h"
 #include "HookMacros.h"
-#include "Utils/RemoteInject.h"
+#include "Pipe/Features/Injection/Injection.h"
+#include "Utils/Config/Config.h"
 
 #include <algorithm>
 #include <cwctype>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace {
 
-    // Lowercased exe basename → real AppId: filled by QueueInjection (from the
-    // SpawnProcess hook), consumed by the CreateProcessW hook. Keyed by basename
-    // because Steam runs the real spawn on a different thread than the hook that
-    // sees the launch, so there's nothing else to correlate the two by.
+    // Launches SpawnProcess saw, by lowercased exe basename: Steam calls CreateProcessW on another thread, so the name is all that ties them.
+    struct Launch {
+        AppId_t     appId = 0;
+        std::string cmdLine;
+    };
     std::mutex g_pendingMutex;
-    std::unordered_map<std::wstring, AppId_t> g_pending;
+    std::unordered_map<std::wstring, Launch> g_pending;
 
     std::wstring LowerBasename(LPCWSTR path) {
         if (!path || !*path) return {};
@@ -40,17 +43,15 @@ namespace {
         return out;
     }
 
-    AppId_t ClaimPending(LPCWSTR app, LPCWSTR cmd) {
+    std::optional<Launch> ClaimPending(LPCWSTR app, LPCWSTR cmd) {
         std::wstring key = LowerBasename(app);
         if (key.empty()) key = LowerBasename(ExeFromCmd(cmd).c_str());
-        if (key.empty()) return 0;
-
         std::lock_guard lk(g_pendingMutex);
         auto it = g_pending.find(key);
-        if (it == g_pending.end()) return 0;
-        AppId_t id = it->second;
+        if (it == g_pending.end()) return std::nullopt;
+        Launch launch = std::move(it->second);
         g_pending.erase(it);
-        return id;
+        return launch;
     }
 
     // ── CreateProcessW / CreateProcessAsUserW hooks ────────────────────
@@ -74,24 +75,13 @@ namespace {
                 : oCreateProcessW(app, cmd, pa, ta, inherit, f, env, cwd, si, pi);
         };
 
-        AppId_t appId = ClaimPending(app, cmd);
-        if (!appId || PayloadPath[0] == 0) return fwd(flags);
+        const std::optional<Launch> launch = ClaimPending(app, cmd);
+        if (!launch || Config::injectDlls.empty()) return fwd(flags);
 
-        // Start suspended so the payload loads before the game's first
-        // instruction, then resume unless the caller already wanted it held.
+        // Start suspended so the DLLs load before the game's first instruction, then resume unless the caller already wanted it held.
         BOOL ok = fwd(flags | CREATE_SUSPENDED);
-        if (!ok) {
-            LOG_INJECT_WARN("appid={} spawn failed err={}", appId, GetLastError());
-            return ok;
-        }
-
-        wchar_t wpayload[MAX_PATH] = {};
-        MultiByteToWideChar(CP_ACP, 0, PayloadPath, -1, wpayload, MAX_PATH);
-        const bool injected = RemoteInject::LoadDll(pi->hProcess, wpayload);
-        LOG_INJECT_INFO("appid={} pid={} payload {}", appId, pi->dwProcessId,
-                        injected ? "loaded" : "FAILED");
-
-        // Injection failure must never bring the game down with us.
+        if (!ok) return ok;
+        PipeManager::Injection::OnLaunch(pi->hProcess, pi->dwProcessId, launch->appId, launch->cmdLine);
         if (!(flags & CREATE_SUSPENDED)) ResumeThread(pi->hThread);
         return ok;
     }
@@ -109,28 +99,10 @@ namespace {
     {
         return Spawn(token, app, cmd, pa, ta, inherit, flags, env, cwd, si, pi);
     }
-
-#ifdef OPENSTEAMTOOL_LOGGING_ENABLED
-    // Each injected game process writes its own <pid>.log here. Wipe the
-    // folder once per Steam session so the files don't pile up forever.
-    void ResetPayloadLogs() {
-        std::error_code ec;
-        auto dir = std::filesystem::path(Config::GetLogDir()) / "payload";
-        std::filesystem::remove_all(dir, ec);
-        std::filesystem::create_directories(dir, ec);
-    }
-#endif
 }
 
 namespace Hooks_Inject {
     void Install() {
-        if (!Config::GetOnlineFixEnabled()) {
-            LOG_INJECT_INFO("payload injection disabled via config");
-            return;
-        }
-#ifdef OPENSTEAMTOOL_LOGGING_ENABLED
-        ResetPayloadLogs();
-#endif
         HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
         if (!k32) return;
         oCreateProcessW       = reinterpret_cast<CreateProcessW_t>      (GetProcAddress(k32, "CreateProcessW"));
@@ -142,7 +114,6 @@ namespace Hooks_Inject {
         if (oCreateProcessAsUserW)
             OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oCreateProcessAsUserW), reinterpret_cast<void*>(hkCreateProcessAsUserW));
         HOOK_END();
-        LOG_INJECT_INFO("spawn hooks installed dll=\"{}\"", PayloadPath);
     }
 
     void Uninstall() {
@@ -161,15 +132,13 @@ namespace Hooks_Inject {
         g_pending.clear();
     }
 
-    void QueueInjection(const char* exePath, AppId_t realAppId) {
-        if (!Config::GetOnlineFixEnabled() || !realAppId || !exePath || !*exePath) return;
-
+    void QueueLaunch(const char* exePath, const char* cmdLine, AppId_t appId) {
+        if (!appId || !exePath || !*exePath) return;
         wchar_t wexe[MAX_PATH] = {};
         MultiByteToWideChar(CP_UTF8, 0, exePath, -1, wexe, MAX_PATH);
-        std::wstring key = LowerBasename(wexe);
+        const std::wstring key = LowerBasename(wexe);
         if (key.empty()) return;
-
         std::lock_guard lk(g_pendingMutex);
-        g_pending[key] = realAppId;
+        g_pending[key] = { appId, cmdLine ? cmdLine : "" };
     }
 }

@@ -72,6 +72,15 @@ bool IsReadable(const void* addr, size_t bytes) {
     return true;
 }
 
+std::span<const uint8_t> FunctionBody(const void* fn) {
+    DWORD64 imageBase = 0;
+    const RUNTIME_FUNCTION* entry = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(fn), &imageBase, nullptr);
+    if (!entry) return {};
+    const auto* begin = reinterpret_cast<const uint8_t*>(fn);
+    const auto* end = reinterpret_cast<const uint8_t*>(imageBase + entry->EndAddress);
+    return begin < end ? std::span<const uint8_t>(begin, end) : std::span<const uint8_t>{};
+}
+
 bool WriteExecutableByte(void* target, uint8_t value) {
     if (!target) {
         OSTP_LOG_WARN("WriteExecutableByte: target is null");
