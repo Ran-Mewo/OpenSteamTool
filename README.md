@@ -34,6 +34,18 @@
   </p>
 </div>
 
+## Install
+1. Open PowerShell and run:
+   ```powershell
+   irm https://raw.githubusercontent.com/Ran-Mewo/scripts/refs/heads/main/opensteam-install.ps1 | iex
+   ```
+   It closes Steam and installs OpenSteamTool, OnlineFix, Millennium and the LuaTools plugin.
+2. To download a game, open its Steam store page, click **Add via LuaTools** at the top, then download it from your library.
+3. To play online, add `-onlinefix` to the game's launch options.
+
+> [!NOTE]
+> If Windows Defender gets in the way (unlikely), add your Steam folder (`C:\Program Files (x86)\Steam`) to its exclusions and temporarily turn off real-time protection.
+
 ## Feature
 
 ### Core Unlocks
