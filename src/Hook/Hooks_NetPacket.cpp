@@ -15,6 +15,7 @@
 #include "Utils/Tickets/EticketClient.h"
 #include "Utils/Support/FnvHash.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
+#include "Utils/Achievements/LocalAchievements.h"
 #include "Steam/NetPacket.h"
 #include "OSTPlatform/include/Memory.h"
 #include <algorithm>
@@ -270,9 +271,10 @@ namespace {
     }
 
     // ── Hash constants for target_job_name dispatch ─────────────
-    constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
+    constexpr uint32 HASH_JOB_GetGameAchievements = Fnv1aHash("Player.GetGameAchievements#1");
+    constexpr uint32 HASH_JOB_GetUserAchievements = Fnv1aHash("Player.GetUserAchievements#1");
 
 } // anonymous namespace
 
@@ -357,6 +359,40 @@ namespace Hooks_NetPacket_UserStats {
     // jobid_source -> appid mapping (eMsg 151 request -> eMsg 147 response)
     std::unordered_map<uint64, AppId_t> g_JobIdToAppId;
 
+    // appid -> group ids, captured from the GetGameAchievements schema so the
+    // GetUserAchievements reply can mark each group achievable.
+    std::unordered_map<AppId_t, std::vector<uint32>> g_GameAchGroups;
+
+    // appid -> [ (internal_key, internal_name) ], captured from the
+    // GetGameAchievements schema so the GetUserAchievements reply can emit each
+    // achievement under its internal_key with the local unlock state looked up
+    // by name. In-memory only, so after a Steam start the first user reply
+    // usually beats it — see g_HeldUserAch.
+    std::unordered_map<AppId_t, std::vector<std::pair<uint32, std::string>>> g_GameAchSchema;
+
+    // appid -> account id (low 32 of the request steamid), captured on send so
+    // the recv handler knows which UserGameStats_<acct>_<app>.bin to read.
+    std::unordered_map<AppId_t, AccountID_t> g_UserAchAccount;
+
+    // GetUserAchievements replies that arrived before their app's schema
+    // (SLS's choke-and-queue). We keep the real header+body, pass the client a
+    // copy aimed at a job nobody waits on (so it is dropped and the real job
+    // stays pending), then deliver the rebuilt reply once the schema lands.
+    // All of this runs on the RecvPkt thread, so no lock.
+    struct HeldUserAch {
+        AppId_t     appId;
+        std::string hdr;    // serialized CMsgProtoBufHeader, eresult already OK
+        std::string body;   // Valve's original CPlayer_GetUserAchievements_Response
+        std::chrono::steady_clock::time_point at;
+    };
+    std::vector<HeldUserAch>       g_HeldUserAch;
+    std::deque<std::vector<uint8>> g_UserAchPending;   // ready-to-deliver 147 frames
+
+    constexpr uint64 kDroppedJobId = 1;   // never allocated by CJobMgr
+    // Release a held reply as-is if its schema never shows, well before the
+    // client's job would time out.
+    constexpr auto kHoldTimeout = std::chrono::seconds(8);
+
     // ── Send: CPlayer_GetUserStats_Request (eMsg 151) ──────────
     bool HandleSend_GetUserStats(const uint8* pBody, uint32 cbBody,
                                  const uint8* pHdr, uint32 cbHdr)
@@ -375,16 +411,19 @@ namespace Hooks_NetPacket_UserStats {
         LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: original body:\n{}", req.DebugString());
         
         AppId_t appId = req.appid();
-        bool hasShaSchema = req.has_sha_schema() && !req.sha_schema().empty();
-
-        if (hasShaSchema) {
-            LOG_ACHIEVEMENT_WARN("Player::GetUserStats request: sha_schema is present, do not spoof");
-            return false;
-        }
         if (!LuaConfig::HasDepot(appId)) {
             LOG_ACHIEVEMENT_WARN("Player::GetUserStats request: appid={} is not in addappid", appId);
             return false;
         }
+
+        // Spoof the stat SteamID even when sha_schema is present, leaving the sha
+        // on the request. The server then returns a fresh schema whenever its hash
+        // differs from the client's, so lua games pick up newly added achievements
+        // instead of keeping their first-downloaded schema forever. The reply is
+        // handled as in the no-sha path (eresult=OK, stats stripped, schema kept),
+        // so local stats are unaffected.
+        if (req.has_sha_schema() && !req.sha_schema().empty())
+            LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: appid={} sha_schema present, spoofing anyway for schema refresh", appId);
 
         // Save jobid_source -> appid for the response handler
         CMsgProtoBufHeader hdr;
@@ -554,6 +593,238 @@ namespace Hooks_NetPacket_UserStats {
         return true;
     }
 
+
+    // ══ New "groups" achievement path ══════════════════════════
+    //  Player.GetGameAchievements#1  (schema: groups + internal_key/name)
+    //  Player.GetUserAchievements#1  (per-user unlock state; blank for unowned)
+    // The client UI reads unlock state from the user reply, not local stats, so
+    // for lua games we rebuild it SLS-style: every schema achievement under its
+    // internal_key with unlock/progress from the local .bin (LocalAchievements),
+    // and every group achievable.
+
+    // Fill resp from the cached schema + local stats. Mirrors SLS field-for-field:
+    // unlocked/unlock_time only when unlocked, progress_float always (the UI
+    // reads it; leaving it unset blanks the page). False if no schema cached.
+    bool FillUserAchievements(AppId_t appId, CPlayer_GetUserAchievements_Response& resp,
+                              size_t& nUnlocked)
+    {
+        auto si = g_GameAchSchema.find(appId);
+        if (si == g_GameAchSchema.end()) return false;
+
+        AccountID_t acct = 0;
+        if (auto ai = g_UserAchAccount.find(appId); ai != g_UserAchAccount.end())
+            acct = ai->second;
+        const auto local = LocalAchievements::Read(appId, acct);
+
+        resp.clear_achievements();
+        resp.clear_groups();
+        nUnlocked = 0;
+        for (const auto& [key, name] : si->second) {
+            auto* a = resp.add_achievements();
+            a->set_internal_key(key);
+            auto li = local.find(name);
+            const bool found = li != local.end();
+            if (found && li->second.unlocked) {
+                a->set_unlocked(true);
+                a->set_unlock_time(li->second.unlockTime);
+                ++nUnlocked;
+            }
+            a->set_progress_float(found ? li->second.progress : 0.0f);
+        }
+        if (auto gi = g_GameAchGroups.find(appId); gi != g_GameAchGroups.end()) {
+            for (uint32 gid : gi->second) {
+                auto* g = resp.add_groups();
+                g->set_groupid(gid);
+                g->set_is_achievable(true);
+            }
+        }
+        return true;
+    }
+
+    // Rebuild a held reply (or pass Valve's as-is if there's still no schema)
+    // and queue it as a full 147 frame for DrainAchievements.
+    void QueueHeldUserAch(const HeldUserAch& h)
+    {
+        CPlayer_GetUserAchievements_Response resp;
+        resp.ParseFromString(h.body);
+        size_t nUnlocked = 0;
+        const bool filled = FillUserAchievements(h.appId, resp, nUnlocked);
+        const std::string body = resp.SerializeAsString();
+
+        const uint32 cbHdr = static_cast<uint32>(h.hdr.size());
+        const uint32 cbBody = static_cast<uint32>(body.size());
+        const uint32 total = sizeof(MsgHdr) + cbHdr + cbBody;
+        if (cbHdr > kMaxHdrSize || cbBody > kMaxBodySize || total > kMaxPacketSize) {
+            LOG_ACHIEVEMENT_WARN("GetUserAchievements: app={} rebuilt reply too large ({} bytes), dropped",
+                                 h.appId, total);
+            return;
+        }
+        std::vector<uint8> pkt(total);
+        auto* mhdr = reinterpret_cast<MsgHdr*>(pkt.data());
+        mhdr->eMsg = static_cast<EMsg>(
+            static_cast<uint32>(k_EMsgServiceMethodResponse) | kMsgHdrProtoFlag);
+        mhdr->headerLength = cbHdr;
+        memcpy(pkt.data() + sizeof(MsgHdr), h.hdr.data(), cbHdr);
+        memcpy(pkt.data() + sizeof(MsgHdr) + cbHdr, body.data(), cbBody);
+        g_UserAchPending.push_back(std::move(pkt));
+
+        if (filled)
+            LOG_ACHIEVEMENT_INFO("GetUserAchievements: app={} queued held reply, {}/{} achievements unlocked",
+                                 h.appId, nUnlocked, resp.achievements_size());
+        else
+            LOG_ACHIEVEMENT_WARN("GetUserAchievements: app={} schema never arrived, released reply as-is",
+                                 h.appId);
+    }
+
+    // ── Send: map jobid_source -> appid (lua games only) ──
+    void HandleSend_GetGameAchievements(const uint8* pBody, uint32 cbBody,
+                                        const uint8* pHdr, uint32 cbHdr)
+    {
+        CPlayer_GetGameAchievements_Request req;
+        if (!req.ParseFromArray(pBody, cbBody) || !req.has_appid()) return;
+        const AppId_t appId = req.appid();
+        if (!LuaConfig::HasDepot(appId)) return;
+        CMsgProtoBufHeader hdr;
+        if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_jobid_source()) {
+            g_JobIdToAppId[hdr.jobid_source()] = appId;
+            LOG_ACHIEVEMENT_DEBUG("GetGameAchievements send: jobid={} -> appid={}", hdr.jobid_source(), appId);
+        }
+    }
+
+    void HandleSend_GetUserAchievements(const uint8* pBody, uint32 cbBody,
+                                        const uint8* pHdr, uint32 cbHdr)
+    {
+        CPlayer_GetUserAchievements_Request req;
+        if (!req.ParseFromArray(pBody, cbBody) || !req.has_appid()) return;
+        const AppId_t appId = req.appid();
+        if (!LuaConfig::HasDepot(appId)) return;
+        if (req.has_steamid())
+            g_UserAchAccount[appId] = static_cast<AccountID_t>(req.steamid() & 0xFFFFFFFFull);
+        CMsgProtoBufHeader hdr;
+        if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_jobid_source()) {
+            g_JobIdToAppId[hdr.jobid_source()] = appId;
+            LOG_ACHIEVEMENT_DEBUG("GetUserAchievements send: jobid={} -> appid={}", hdr.jobid_source(), appId);
+        }
+    }
+
+    // ── Recv: GetGameAchievements response -> capture group ids, pass through ──
+    void HandleRecv_GetGameAchievementsResponse(const uint8* pHdr, uint32 cbHdr,
+                                                const uint8* pBody, uint32 cbBody)
+    {
+        CMsgProtoBufHeader hdr;
+        if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_target()) return;
+        auto it = g_JobIdToAppId.find(hdr.jobid_target());
+        if (it == g_JobIdToAppId.end()) return;
+        const AppId_t appId = it->second;
+        g_JobIdToAppId.erase(it);
+
+        CPlayer_GetGameAchievements_Response resp;
+        if (!resp.ParseFromArray(pBody, cbBody)) return;
+        std::vector<uint32> groups;
+        groups.reserve(static_cast<size_t>(resp.groups_size()));
+        for (const auto& g : resp.groups())
+            if (g.has_groupid()) groups.push_back(g.groupid());
+
+        // Capture (internal_key, internal_name) so the user reply can emit each
+        // achievement under its key with unlock state resolved by name.
+        std::vector<std::pair<uint32, std::string>> schema;
+        schema.reserve(static_cast<size_t>(resp.achievements_size()));
+        for (const auto& a : resp.achievements())
+            if (a.has_internal_key() && a.has_internal_name())
+                schema.emplace_back(a.internal_key(), a.internal_name());
+
+        // A hash_only reply carries no achievements; don't let it wipe a good cache.
+        if (schema.empty() && g_GameAchSchema.count(appId)) {
+            LOG_ACHIEVEMENT_DEBUG("GetGameAchievements recv: app={} empty reply, keeping cached schema", appId);
+        } else {
+            LOG_ACHIEVEMENT_DEBUG("GetGameAchievements recv: app={} stored {} group(s), {} achievement(s)",
+                                  appId, groups.size(), schema.size());
+            g_GameAchGroups[appId] = std::move(groups);
+            g_GameAchSchema[appId] = std::move(schema);
+        }
+
+        // Release any user replies that were waiting on this schema.
+        for (auto h = g_HeldUserAch.begin(); h != g_HeldUserAch.end();) {
+            if (h->appId == appId) { QueueHeldUserAch(*h); h = g_HeldUserAch.erase(h); }
+            else ++h;
+        }
+        // Pass through: Valve's public schema is correct.
+    }
+
+    // ── Recv: GetUserAchievements response -> rebuilt from schema + local stats ──
+    void HandleRecv_GetUserAchievementsResponse(const uint8* pHdr, uint32 cbHdr,
+                                                const uint8* pBody, uint32 cbBody)
+    {
+        CMsgProtoBufHeader hdr;
+        if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_target()) return;
+        auto it = g_JobIdToAppId.find(hdr.jobid_target());
+        if (it == g_JobIdToAppId.end()) return;
+        const AppId_t appId = it->second;
+        g_JobIdToAppId.erase(it);
+        if (!LuaConfig::HasDepot(appId)) return;
+
+        // Header: force eresult OK so the client doesn't treat the game as denied.
+        hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
+
+        CPlayer_GetUserAchievements_Response resp;
+        if (!resp.ParseFromArray(pBody, cbBody)) return;
+
+        size_t nUnlocked = 0;
+        if (!FillUserAchievements(appId, resp, nUnlocked)) {
+            // Beat its schema (normal on the first page open after a Steam
+            // start). Hold the real reply; aim this copy at a dead job so the
+            // client drops it while the real job keeps waiting.
+            g_HeldUserAch.push_back({ appId, hdr.SerializeAsString(),
+                                      std::string(reinterpret_cast<const char*>(pBody), cbBody),
+                                      std::chrono::steady_clock::now() });
+            hdr.set_jobid_target(kDroppedJobId);
+            g_cbNewHdr = static_cast<uint32>(hdr.ByteSizeLong());
+            if (g_cbNewHdr > kMaxHdrSize || !hdr.SerializeToArray(g_NewHdr, kMaxHdrSize)) {
+                g_HeldUserAch.pop_back();   // can't choke it; let it through untouched
+                return;
+            }
+            g_NeedReplaceHdr = true;
+            LOG_ACHIEVEMENT_INFO("GetUserAchievements recv: app={} arrived before schema, held", appId);
+            return;
+        }
+
+        g_cbNewHdr = static_cast<uint32>(hdr.ByteSizeLong());
+        if (g_cbNewHdr > kMaxHdrSize || !hdr.SerializeToArray(g_NewHdr, kMaxHdrSize)) return;
+        g_NeedReplaceHdr = true;
+        g_cbNewBody = static_cast<uint32>(resp.ByteSizeLong());
+        if (g_cbNewBody > kMaxBodySize || !resp.SerializeToArray(g_NewBody, kMaxBodySize)) return;
+        g_NeedReplaceBody = true;
+        LOG_ACHIEVEMENT_INFO("GetUserAchievements recv: app={} eresult=OK, {} group(s), {}/{} achievements unlocked",
+                             appId, resp.groups_size(), nUnlocked, resp.achievements_size());
+    }
+
+    // Deliver queued rebuilt replies by borrowing the carrier packet for one
+    // oRecvPkt call each (same trick as Cloud::Drain), after first releasing
+    // any held reply whose schema never showed.
+    void DrainAchievements(void* pThis, CNetPacket* pCarrier,
+                           bool (*invokeOriginal)(void*, CNetPacket*))
+    {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto h = g_HeldUserAch.begin(); h != g_HeldUserAch.end();) {
+            if (now - h->at >= kHoldTimeout) { QueueHeldUserAch(*h); h = g_HeldUserAch.erase(h); }
+            else ++h;
+        }
+
+        while (!g_UserAchPending.empty()) {
+            std::vector<uint8> pkt = std::move(g_UserAchPending.front());
+            g_UserAchPending.pop_front();
+
+            uint8* origData = NetPkt::Data(pCarrier);
+            uint32 origSize = NetPkt::Size(pCarrier);
+            NetPkt::Data(pCarrier) = pkt.data();
+            NetPkt::Size(pCarrier) = static_cast<uint32>(pkt.size());
+            invokeOriginal(pThis, pCarrier);
+            NetPkt::Data(pCarrier) = origData;
+            NetPkt::Size(pCarrier) = origSize;
+            LOG_ACHIEVEMENT_DEBUG("GetUserAchievements: delivered {}-byte held reply", pkt.size());
+        }
+    }
+
 } // namespace Hooks_NetPacket_UserStats
 
 
@@ -676,21 +947,6 @@ namespace Hooks_NetPacket_OwnershipTicket {
     }
 
 } // namespace Hooks_NetPacket_OwnershipTicket
-
-
-// ════════════════════════════════════════════════════════════════
-//  Hooks_NetPacket_FamilySharing
-// ════════════════════════════════════════════════════════════════
-namespace Hooks_NetPacket_FamilySharing {
-
-    void ClearBody(const uint8*, uint32)
-    {
-        LOG_NETPACKET_DEBUG("Clearing family sharing message...");
-        g_cbNewBody = 0;
-        g_NeedReplaceBody = true;
-    }
-
-} // namespace Hooks_NetPacket_FamilySharing
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1950,6 +2206,14 @@ namespace {
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
+        case HASH_JOB_GetGameAchievements:
+            Hooks_NetPacket_UserStats::HandleSend_GetGameAchievements(pBody, cbBody, pHdr, cbHdr);
+            return false;
+
+        case HASH_JOB_GetUserAchievements:
+            Hooks_NetPacket_UserStats::HandleSend_GetUserAchievements(pBody, cbBody, pHdr, cbHdr);
+            return false;
+
         // ---- add new 151 service methods here ----
         }
         return false;
@@ -2019,10 +2283,6 @@ namespace {
 
         switch (Fnv1aHash(targetJobName)) {
 
-        case HASH_JOB_NotifyRunningApps:
-            Hooks_NetPacket_FamilySharing::ClearBody(pBody, cbBody);
-            return;
-
         case HASH_JOB_GetUserStats:
             Hooks_NetPacket_UserStats::HandleRecv_GetUserStatsResponse(pHdr, cbHdr, pBody, cbBody);
             return;
@@ -2034,6 +2294,14 @@ namespace {
             if (Hooks_NetPacket_ManifestProbe::HandleRecv(pBody, cbBody, pHdr, cbHdr))
                 return;
             Hooks_NetPacket_Manifest::HandleRecv(pBody, cbBody, pHdr, cbHdr);
+            return;
+
+        case HASH_JOB_GetGameAchievements:
+            Hooks_NetPacket_UserStats::HandleRecv_GetGameAchievementsResponse(pHdr, cbHdr, pBody, cbBody);
+            return;
+
+        case HASH_JOB_GetUserAchievements:
+            Hooks_NetPacket_UserStats::HandleRecv_GetUserAchievementsResponse(pHdr, cbHdr, pBody, cbBody);
             return;
 
         // ---- add new 147 service methods here ----
@@ -2070,10 +2338,6 @@ namespace {
         case k_EMsgClientGetUserStatsResponse:     // 819
             g_NeedReplaceBody = Hooks_NetPacket_UserStats::HandleRecv_ClientGetUserStatsResponse(
                 pBody, cbBody);
-            return;
-
-        case k_EMsgClientSharedLibraryStopPlaying:     // 9406
-            Hooks_NetPacket_FamilySharing::ClearBody(pBody, cbBody);
             return;
 
         case k_EMsgClientPersonaState:                 // 766
@@ -2192,6 +2456,10 @@ namespace {
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
 
         Hooks_NetPacket_LegacyKey::Drain(
+            pThis, pPacket,
+            [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
+
+        Hooks_NetPacket_UserStats::DrainAchievements(
             pThis, pPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
 
